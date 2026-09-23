@@ -1096,22 +1096,28 @@ export async function handleGatewayRequest(
 		await logFailover(fe);
 	}
 
+	const finalStatus = lastStatusCode || 503;
+	const finalMessage = lastError || 'All provider keys exhausted. Please try again later.';
+	const finalType = finalStatus === 401 ? 'authentication_error' : finalStatus === 429 ? 'rate_limit_error' : 'service_unavailable';
+
 	return {
 		requestId,
 		masterKeyId: masterKey?.id ?? '',
 		provider: masterKey?.provider ?? '',
-		httpStatus: 503,
+		httpStatus: finalStatus,
 		isSuccess: false,
 		promptTokens: 0,
 		completionTokens: 0,
 		totalTokens: 0,
 		creditsUsed: 0,
 		responseTimeMs: totalResponseTime,
-		errorMessage: 'All provider keys exhausted. Please try again later.',
+		errorMessage: finalMessage,
 		responseBody: {
+			type: 'error',
 			error: {
-				message: 'Service Unavailable — all upstream providers are unreachable after multiple retries.',
-				type: 'service_unavailable',
+				type: finalType,
+				message: finalMessage,
+				status: finalStatus,
 				retries: retryNumber,
 			},
 		},
