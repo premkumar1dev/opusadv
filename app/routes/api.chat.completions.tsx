@@ -87,7 +87,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
 	return data({
 		status: "ok",
 		service: "OpusZen API Gateway",
-		version: "1.4.0",
+		version: "9.8.0",
 		timestamp: new Date().toISOString(),
 		endpoints: {
 			chat: "/v1/chat/completions",
