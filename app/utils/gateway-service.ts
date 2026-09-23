@@ -149,21 +149,34 @@ function extractUsage(responseBody: any): TokenUsage {
 // Transform OpenAI-compatible request to provider format
 // ---------------------------------------------------------------------------
 function buildProviderHeaders(
-	masterKey: MasterApiKeyRow
+	masterKey: MasterApiKeyRow,
+	incomingHeaders?: any
 ): Record<string, string> {
 	const headers: Record<string, string> = {
 		'Content-Type': 'application/json',
+		'Authorization': `Bearer ${masterKey.api_key}`,
+		'x-api-key': masterKey.api_key,
+		'anthropic-version': '2023-06-01',
 	};
 
-	// All upstream requests go to opusmax (OpenAI-compatible), always use Bearer
-	headers['Authorization'] = `Bearer ${masterKey.api_key}`;
+	if (incomingHeaders) {
+		const getH = (k: string) => {
+			if (typeof incomingHeaders.get === 'function') return incomingHeaders.get(k);
+			return incomingHeaders[k] || incomingHeaders[k.toLowerCase()];
+		};
+		const antVer = getH('anthropic-version');
+		if (antVer) headers['anthropic-version'] = antVer;
+		const antBeta = getH('anthropic-beta');
+		if (antBeta) headers['anthropic-beta'] = antBeta;
+	}
+
 	return headers;
 }
 
 // ---------------------------------------------------------------------------
 // Build request URL
 // ---------------------------------------------------------------------------
-function buildProviderUrl(provider: string, model: string): string {
+function buildProviderUrl(provider: string, model: string, endpointPath?: string): string {
 	const config = getProviderConfig(provider);
 	const base = config.baseUrl.replace(/\/+$/, '');
 
@@ -171,8 +184,16 @@ function buildProviderUrl(provider: string, model: string): string {
 		return base;
 	}
 
+	const ep = (endpointPath || '').toLowerCase();
+	if (ep.includes('/messages')) {
+		return `${base}/messages`;
+	}
+	if (ep.includes('/chat/completions')) {
+		return `${base}/chat/completions`;
+	}
+
 	const isAnthropic = provider.toLowerCase().includes('anthropic') || model.toLowerCase().startsWith('claude');
-	if (isAnthropic && (base.includes('anthropic') || provider === 'Anthropic')) {
+	if (isAnthropic) {
 		return `${base}/messages`;
 	}
 
@@ -264,7 +285,7 @@ function transformResponse(
 
 	if (isMessagesEndpoint) {
 		// Client expects Anthropic message format
-		if (provider === 'Anthropic') {
+		if (provider === 'Anthropic' || body?.type === 'message' || Array.isArray(body?.content)) {
 			return body;
 		}
 		// Transform OpenAI/Google/Groq/etc. format into Anthropic message format
@@ -451,8 +472,8 @@ export async function handleGatewayRequest(
 
 		// All upstream requests go to opusmax regardless of key's stored provider name
 		const upstreamProvider = 'opusmax';
-		const url = buildProviderUrl(upstreamProvider, ctx.model);
-		const headers = buildProviderHeaders(candidate);
+		const url = buildProviderUrl(upstreamProvider, ctx.model, ctx.endpointPath);
+		const headers = buildProviderHeaders(candidate, ctx.headers);
 		const body = transformRequestBody(upstreamProvider, {
 			...request,
 			model: ctx.model,
@@ -506,8 +527,34 @@ export async function handleGatewayRequest(
 		}
 
 		const responseTimeMs = Date.now() - fetchStart;
-		let responseBody: unknown;
 		const contentType = response.headers.get('content-type') || '';
+		const isStream = contentType.includes('text/event-stream') || Boolean((request as any).stream);
+
+		if (response.ok && (isStream || contentType.includes('event-stream')) && response.body) {
+			await markMasterKeySuccess(candidate.id);
+			await recordHealthSuccess(candidate.id, responseTimeMs);
+			await recordUsage(candidate.id, candidate.provider, 0, 0, responseTimeMs);
+
+			return {
+				requestId,
+				masterKeyId: candidate.id,
+				provider: candidate.provider,
+				httpStatus: response.status,
+				isSuccess: true,
+				promptTokens: 0,
+				completionTokens: 0,
+				totalTokens: 0,
+				creditsUsed: 0,
+				responseTimeMs,
+				isStream: true,
+				stream: response.body,
+				contentType: contentType || 'text/event-stream',
+				responseBody: null,
+				retryNumber: retryNumber + 1,
+			};
+		}
+
+		let responseBody: unknown;
 		if (contentType.includes('application/json')) {
 			responseBody = await response.json().catch(() => ({}));
 		} else {

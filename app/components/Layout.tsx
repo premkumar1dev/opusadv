@@ -538,7 +538,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
  <NavLink to="/terms" className="hover:text-primary transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded">Terms</NavLink>
  <NavLink to="/privacy" className="hover:text-primary transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded">Privacy</NavLink>
  </nav>
- <p className="text-[11px] text-muted-foreground/60">
+ <p className="text-xs text-muted-foreground">
  &copy; {new Date().getFullYear()} OpusZen. All rights reserved.
  </p>
  </div>

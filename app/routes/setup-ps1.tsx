@@ -1,20 +1,10 @@
 import { type LoaderFunctionArgs } from "react-router";
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  const url = new URL(request.url);
-  const host = url.origin;
+  const host = "https://opuszen.shop";
 
-  let apiEndpoint = "https://api.opuszen.shop";
-  let brandName = "OpusZen";
-  if (import.meta.env.VITE_API_URL) {
-    apiEndpoint = import.meta.env.VITE_API_URL.replace(/\/api$/, "");
-    if (host.includes("localhost")) {
-      brandName = "OpusZen (Local)";
-    }
-  } else if (host.includes("localhost")) {
-    apiEndpoint = "http://localhost:3000";
-    brandName = "OpusZen (Local)";
-  }
+  const apiEndpoint = import.meta.env.VITE_API_URL || "https://api.opuszen.shop";
+  const brandName = "OpusZen";
 
   const scriptContent = `# ${brandName} Setup Script for Windows
 # Usage: irm ${host}/setup.ps1 | iex
@@ -122,7 +112,8 @@ Write-Host ""
 Write-Host "  Verifying connection..." -ForegroundColor Yellow
 try {
     $headers = @{ "x-api-key" = $ApiKey }
-    Invoke-RestMethod -Uri "$ApiEndpoint/v1/models" -Headers $headers -Method Get -TimeoutSec 10 | Out-Null
+    $verifyUrl = if ($ApiEndpoint -match '/v1/?$') { "$ApiEndpoint/models" } else { "$ApiEndpoint/v1/models" }
+    Invoke-RestMethod -Uri $verifyUrl -Headers $headers -Method Get -TimeoutSec 10 | Out-Null
     Write-Host "  ✓ Connected" -ForegroundColor Green
 } catch {
     Write-Host "  ⚠ Could not verify (config saved — check key later)" -ForegroundColor DarkYellow

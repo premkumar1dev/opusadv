@@ -235,6 +235,7 @@ export interface GatewayRequestContext {
  userAgent: string;
  endpointPath?: string;
  body?: Record<string, any>;
+ headers?: any;
 }
 
 export interface GatewayResponseContext {
@@ -251,6 +252,9 @@ export interface GatewayResponseContext {
  errorMessage?: string;
  responseBody: any;
  retryNumber: number;
+ isStream?: boolean;
+ stream?: any;
+ contentType?: string;
 }
 
 export interface FailoverEvent {

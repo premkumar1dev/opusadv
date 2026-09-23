@@ -8,6 +8,7 @@
  */
 
 const BUILTIN_ALLOWED_ORIGINS = [
+	"https://opuszen.shop",
 	"https://api.opuszen.shop",
 	"https://www.opuszen.shop",
 	"https://api.opusmax.live",

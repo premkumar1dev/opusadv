@@ -203,7 +203,7 @@ export async function action({ request }: ActionFunctionArgs): Promise<ActionDat
 			user_token: gatewaySettings.api_key,
 			amount: String(amt),
 			order_id: orderId,
-			redirect_url: (request.headers.get("x-forwarded-proto") || "http") + "://" + (request.headers.get("host") || "localhost") + "/auth/admin/settings/payments",
+			redirect_url: (request.headers.get("x-forwarded-proto") || "https") + "://" + (request.headers.get("host") || "opuszen.shop") + "/auth/admin/settings/payments",
 			remark1: "admin_test_payment",
 			remark2: "test",
 		});

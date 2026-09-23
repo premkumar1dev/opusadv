@@ -27,11 +27,9 @@ interface StatusResponse {
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
-	const host =
-		request.headers.get("x-forwarded-host") ||
-		request.headers.get("host") ||
-		"localhost:3000";
-	const protocol = request.headers.get("x-forwarded-proto") || "http";
+	const rawHost = request.headers.get("x-forwarded-host") || request.headers.get("host") || "opuszen.shop";
+	const host = rawHost.includes("localhost") ? "opuszen.shop" : rawHost;
+	const protocol = host.includes("opuszen.shop") ? "https" : (request.headers.get("x-forwarded-proto") || "https");
 	const baseUrl = `${protocol}://${host}`;
 
 	return { baseUrl };

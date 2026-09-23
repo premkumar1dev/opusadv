@@ -20,7 +20,7 @@ export default function CompatibilityStrip() {
  whileInView={{ opacity: 1, y: 0 }}
  viewport={{ once: true }}
  transition={{ duration: 0.5 }}
- className="text-sm uppercase tracking-widest text-muted-foreground text-center mb-10"
+ className="text-sm font-semibold tracking-normal text-muted-foreground text-center mb-10"
  >
  Works where you already work
  </motion.h3>

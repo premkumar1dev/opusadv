@@ -26,7 +26,7 @@ export default function LogoTicker() {
 	return (
 		<section ref={sectionRef} className="relative py-20 overflow-hidden bg-background">
 			<motion.div style={{ opacity }} className="text-center mb-10">
-				<h3 className="text-sm uppercase tracking-[0.2em] text-muted-foreground font-medium">
+				<h3 className="text-sm font-semibold tracking-normal text-muted-foreground">
 					Works where you already work
 				</h3>
 			</motion.div>

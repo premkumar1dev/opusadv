@@ -26,13 +26,13 @@ export const meta: MetaFunction = () => [
 export async function loader({ request }: LoaderFunctionArgs) {
 	const origin = request.headers.get("origin") || "*";
 	const allowedOrigins = [
+		"https://opuszen.shop",
+		"https://www.opuszen.shop",
+		"https://api.opuszen.shop",
 		"https://opusmax.live",
 		"https://www.opusmax.live",
 		"https://opuszen.com",
 		"https://www.opuszen.com",
-		"http://localhost:3000",
-		"http://localhost:5174",
-		"http://localhost:5173",
 	];
 
 	const headers = new Headers();

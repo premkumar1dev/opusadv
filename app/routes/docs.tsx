@@ -119,11 +119,11 @@ function Section({
 
 export default function DocsRoute() {
  const [activeSection, setActiveSection] = useState("overview");
- const [host, setHost] = useState("opuszen.com");
+ const [host, setHost] = useState("opuszen.shop");
 
  useEffect(() => {
  if (typeof window !== "undefined") {
- setHost(window.location.host);
+ setHost(window.location.host.includes("localhost") ? "opuszen.shop" : window.location.host);
  }
  }, []);
 

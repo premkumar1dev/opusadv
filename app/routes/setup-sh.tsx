@@ -1,20 +1,10 @@
 import { type LoaderFunctionArgs } from "react-router";
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  const url = new URL(request.url);
-  const host = url.origin;
+  const host = "https://opuszen.shop";
 
-  let apiEndpoint = "https://api.opuszen.shop";
-  let brandName = "OpusZen";
-  if (import.meta.env.VITE_API_URL) {
-    apiEndpoint = import.meta.env.VITE_API_URL.replace(/\/api$/, "");
-    if (host.includes("localhost")) {
-      brandName = "OpusZen (Local)";
-    }
-  } else if (host.includes("localhost")) {
-    apiEndpoint = "http://localhost:3000";
-    brandName = "OpusZen (Local)";
-  }
+  const apiEndpoint = import.meta.env.VITE_API_URL || "https://api.opuszen.shop";
+  const brandName = "OpusZen";
 
   const scriptContent = `#!/usr/bin/env bash
 set -e
@@ -77,7 +67,11 @@ echo "✓"
 # [3/3] Verify
 echo ""
 printf "  Verifying connection... "
-HTTP=\$(curl -s -o /dev/null -w "%{http_code}" -H "x-api-key: \$API_KEY" "\$API_URL/v1/models" 2>/dev/null || echo "000")
+VERIFY_URL="\$API_URL/v1/models"
+if [[ "\$API_URL" =~ /v1/?$ ]]; then
+  VERIFY_URL="\$API_URL/models"
+fi
+HTTP=\$(curl -s -o /dev/null -w "%{http_code}" -H "x-api-key: \$API_KEY" "\$VERIFY_URL" 2>/dev/null || echo "000")
 if [ "\$HTTP" = "200" ]; then
   echo "✓ Connected"
 else

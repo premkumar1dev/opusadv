@@ -32,6 +32,28 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
 	const url = new URL(request.url);
 	if (url.pathname.endsWith("/models")) {
+		try {
+			const controller = new AbortController();
+			const timeoutId = setTimeout(() => controller.abort(), 3000);
+			const upstreamRes = await fetch("https://api.opusmax.live/v1/models", {
+				headers: {
+					"Accept": "application/json",
+					...(request.headers.get("authorization") ? { "Authorization": request.headers.get("authorization")! } : {}),
+					...(request.headers.get("x-api-key") ? { "x-api-key": request.headers.get("x-api-key")! } : {}),
+				},
+				signal: controller.signal,
+			});
+			clearTimeout(timeoutId);
+			if (upstreamRes.ok) {
+				const json: any = await upstreamRes.json().catch(() => null);
+				if (json && (Array.isArray(json.data) || Array.isArray(json))) {
+					return data(json, { headers: CORS_HEADERS });
+				}
+			}
+		} catch {
+			// fallback to local list
+		}
+
 		return data({
 			object: "list",
 			data: [
@@ -158,6 +180,7 @@ export async function action({ request }: ActionFunctionArgs) {
 			userAgent: request.headers.get("user-agent") ?? "",
 			endpointPath: urlPath,
 			body,
+			headers: request.headers,
 		};
 
 		// 4. Execute gateway with failover
@@ -165,6 +188,21 @@ export async function action({ request }: ActionFunctionArgs) {
 
 		// 5. Return response
 		if (result.isSuccess) {
+			if (result.isStream && result.stream) {
+				return new Response(result.stream, {
+					status: result.httpStatus === 0 ? 200 : result.httpStatus,
+					headers: {
+						...CORS_HEADERS,
+						'Content-Type': result.contentType || 'text/event-stream',
+						'Cache-Control': 'no-cache, no-transform',
+						'Connection': 'keep-alive',
+						'X-Request-Id': requestId,
+						'X-Master-Key-Id': result.masterKeyId,
+						'X-Provider': result.provider,
+					},
+				});
+			}
+
 			return data(result.responseBody ?? { choices: [] }, {
 				status: result.httpStatus === 0 ? 200 : result.httpStatus,
 				headers: {

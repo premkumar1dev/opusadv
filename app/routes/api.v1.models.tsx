@@ -20,6 +20,28 @@ export async function loader({ request }: LoaderFunctionArgs) {
 		return new Response(null, { status: 204, headers: CORS_HEADERS });
 	}
 
+	try {
+		const controller = new AbortController();
+		const timeoutId = setTimeout(() => controller.abort(), 3000);
+		const upstreamRes = await fetch("https://api.opusmax.live/v1/models", {
+			headers: {
+				"Accept": "application/json",
+				...(request.headers.get("authorization") ? { "Authorization": request.headers.get("authorization")! } : {}),
+				...(request.headers.get("x-api-key") ? { "x-api-key": request.headers.get("x-api-key")! } : {}),
+			},
+			signal: controller.signal,
+		});
+		clearTimeout(timeoutId);
+		if (upstreamRes.ok) {
+			const json: any = await upstreamRes.json().catch(() => null);
+			if (json && (Array.isArray(json.data) || Array.isArray(json))) {
+				return data(json, { headers: CORS_HEADERS });
+			}
+		}
+	} catch {
+		// fallback to local models cache below
+	}
+
 	const models = [
 		{ id: "opuslive-1", name: "OpusLive 1", object: "model", created: 1772496000, launch_date: "Mar 1, 2026", context: "1,000,000", type: "Frontier", owned_by: "opuslive", description: "OpusLive model via api.opuslive.pro proxy with handshake authentication." },
 		{ id: "claude-fable-5", name: "Claude Fable 5", object: "model", created: 1772496000, launch_date: "Mar 1, 2026", context: "1,000,000", type: "Frontier", owned_by: "anthropic", description: "The most capable model in the lineup. Frontier reasoning and long-horizon agentic work." },
