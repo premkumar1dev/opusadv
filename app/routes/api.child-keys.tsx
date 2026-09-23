@@ -23,12 +23,7 @@ async function getAuthenticatedUserId(request: Request): Promise<string | null> 
 	if (!accessTokenMatch) return null;
 
 	try {
-		const { createClient } = require("@supabase/supabase-js");
-		const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || import.meta.env.VITE_SUPABASE_URL;
-		const pubKey = process.env.SUPABASE_PUBLISHABLE_KEY || process.env.VITE_SUPABASE_PUBLISHABLE_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
-		if (!url || !pubKey) return null;
-		const supa = createClient(url, pubKey);
-		const { data, error } = await supa.auth.getUser(accessTokenMatch[1]);
+		const { data, error } = await supabaseServer.auth.getUser(accessTokenMatch[1]);
 		if (error || !data.user) return null;
 		return data.user.id;
 	} catch {
@@ -51,7 +46,7 @@ export async function action({ request }: ActionFunctionArgs) {
 	}
 
 	try {
-		const userId = getAuthenticatedUserId(request);
+		const userId = await getAuthenticatedUserId(request);
 		if (!userId) {
 			return jsonResponse(false, "Authentication required", 401);
 		}

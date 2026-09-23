@@ -75,20 +75,21 @@ export async function action({ request }: ActionFunctionArgs) {
 			payment_method: string;
 		} | null = null;
 
+		const safeId = orderId.replace(/[^a-zA-Z0-9_-]/g, "");
 		if (isUuid) {
 			const { data } = await supabaseServer
 				.from("orders")
-				.select("id, user_id, plan_name, status, duration_days, multiplier, min_credits, price_per_1m_input, price_per_1m_output, pricing_type, payment_method")
+				.select("id, user_id, plan_name, status, duration_days, multiplier, min_credits, price_per_1m_input, price_per_1m_output, pricing_type, payment_method, payment_ref")
 				.eq("id", orderId)
 				.maybeSingle();
-			order = data;
+			order = data as any;
 		} else {
 			const { data } = await supabaseServer
 				.from("orders")
-				.select("id, user_id, plan_name, status, duration_days, multiplier, min_credits, price_per_1m_input, price_per_1m_output, pricing_type, payment_method")
-				.or(`display_id.eq.${orderId},payment_ref.eq.${orderId}`)
+				.select("id, user_id, plan_name, status, duration_days, multiplier, min_credits, price_per_1m_input, price_per_1m_output, pricing_type, payment_method, payment_ref")
+				.or(`display_id.eq.${safeId},payment_ref.eq.${safeId}`)
 				.maybeSingle();
-			order = data;
+			order = data as any;
 		}
 
 		if (!order) {
@@ -100,41 +101,74 @@ export async function action({ request }: ActionFunctionArgs) {
 			return jsonResponse(false, "Access denied — order does not belong to you", 403);
 		}
 
-		// Verify the order is paid (not pending or cancelled)
+		// Verify the order is not cancelled or refunded
 		if (order.status === "cancelled" || order.status === "refunded") {
 			return jsonResponse(false, `Order is ${order.status} — cannot finalize`, 400);
 		}
 
-		// Check idempotency: if already completed, return success
-		if (order.status === "completed") {
-			return jsonResponse({ success: true, alreadyFinalized: true });
+		const utr = ((formData.get("utr") as string) || "").trim();
+
+		// If pending, verify payment with payment gateway
+		if (order.status === "pending") {
+			const { data: gatewaySettings } = await supabaseServer
+				.from("payment_gateway_settings")
+				.select("*")
+				.eq("is_active", true)
+				.maybeSingle();
+
+			let paymentVerified = false;
+			let verifiedRef = utr;
+
+			if (gatewaySettings?.api_key && gatewaySettings.check_status_endpoint) {
+				try {
+					const { PaymentSDK } = await import("~/utils/payment-sdk");
+					const sdk = new PaymentSDK(
+						gatewaySettings.api_base_url,
+						gatewaySettings.create_order_endpoint,
+						gatewaySettings.check_status_endpoint
+					);
+					const statusRes: any = await sdk.checkOrderStatus({
+						user_token: gatewaySettings.api_key,
+						order_id: (order as any).payment_ref || order.id,
+					});
+
+					const st = String(statusRes?.status || statusRes?.data?.status || statusRes?.result?.txnStatus || statusRes?.result?.status || "").toUpperCase();
+					if (st === "COMPLETED" || st === "SUCCESS" || statusRes?.status === true) {
+						paymentVerified = true;
+						verifiedRef = statusRes?.data?.utr || statusRes?.result?.utr || statusRes?.utr || utr || (order as any).payment_ref;
+					}
+				} catch (sdkErr) {
+					console.warn("[api/finalize-key] Gateway verification call failed:", sdkErr);
+				}
+			}
+
+			if (!paymentVerified) {
+				return jsonResponse(
+					false,
+					"Payment verification pending. Please complete your payment, or wait a few moments if you just completed it.",
+					402
+				);
+			}
+
+			// Mark order as completed after successful verification
+			await supabaseServer
+				.from("orders")
+				.update({
+					status: "completed",
+					payment_ref: verifiedRef || orderId || null,
+					notes: `Order ${orderId} — payment verified${verifiedRef ? ` (Ref ${verifiedRef})` : ""}`,
+				})
+				.eq("id", order.id);
 		}
 
-		// Derive key parameters from the DB order — ignore client-provided values
-		const planName = order.plan_name || "Purchased Key";
+		// Extract plan details from authoritative database order
+		const planName = order.plan_name || "Pro Plan";
 		const durationDays = order.duration_days || 30;
 		const multiplier = order.multiplier || 1;
 		const tokenPricing = order.pricing_type === "per_token";
 		const minCredits = order.min_credits || 0;
 		const pricePer1mInput = order.price_per_1m_input || 0;
 		const pricePer1mOutput = order.price_per_1m_output || 0;
-		const utr = (formData.get("utr") as string) || "";
-
-		// Mark order as completed
-		const { error: orderError } = await supabaseServer
-			.from("orders")
-			.update({
-				status: "completed",
-				payment_ref: utr || orderId || null,
-				notes: `Order ${orderId} — ${order.payment_method || "payment"} confirmed${utr ? ` (UTR ${utr})` : ""}`,
-			})
-			.eq("id", order.id)
-			.eq("status", "pending");
-
-		if (orderError) {
-			console.error("[api/finalize-key] Failed to update order:", orderError);
-			return jsonResponse(false, "Failed to update order status", 500);
-		}
 
 		// Generate API key (CSPRNG)
 		const fullKey = generateSecureKey("sk_live_", 18);

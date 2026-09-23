@@ -32,23 +32,24 @@ interface LoaderData {
 
 async function searchOrdersByTerm(term: string) {
 	const clean = term.trim();
-	if (!clean) return { data: [], error: null };
+	if (!clean || clean.length < 3) return { data: [], error: null };
 
-	// Strip characters that could manipulate PostgREST OR filters
-	function sanitizeSearchInput(input: string): string {
-		return input
-			.replace(/,/g, ' ') // filter separator
-			.replace(/\./g, ' ') // column/operator separator
-			.trim();
+	// Strip characters that could manipulate PostgREST filters
+	const safe = clean.replace(/[^a-zA-Z0-9_-]/g, "");
+	if (!safe) return { data: [], error: null };
+
+	const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(safe);
+	const PUBLIC_ORDER_COLUMNS = "id, display_id, plan_name, amount, currency, status, payment_method, coupon_code, discount, final_amount, completed_at, created_at";
+
+	let query = supabaseServer.from("orders").select(PUBLIC_ORDER_COLUMNS);
+
+	if (isUuid) {
+		query = query.or(`id.eq.${safe},display_id.eq.${safe},payment_ref.eq.${safe}`);
+	} else {
+		query = query.or(`display_id.eq.${safe},payment_ref.eq.${safe}`);
 	}
 
-	const safe = sanitizeSearchInput(clean);
-	return await supabaseServer
-		.from("orders")
-		.select("*")
-		.or(`display_id.eq.${safe},payment_ref.eq.${safe},display_id.ilike.%${safe}%,payment_ref.ilike.%${safe}%,username.ilike.%${safe}%`)
-		.order("created_at", { ascending: false })
-		.limit(10);
+	return await query.order("created_at", { ascending: false }).limit(5);
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {

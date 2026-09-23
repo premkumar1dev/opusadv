@@ -236,6 +236,7 @@ export interface GatewayRequestContext {
  endpointPath?: string;
  body?: Record<string, any>;
  headers?: any;
+ signal?: AbortSignal;
 }
 
 export interface GatewayResponseContext {

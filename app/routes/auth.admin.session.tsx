@@ -29,8 +29,12 @@ export async function action({ request }: ActionFunctionArgs) {
 		});
 	}
 
-	const role = (data.user as any).app_metadata?.role || (data.user as any).user_metadata?.role;
-	if (role !== "admin") {
+	const role = (data.user as any).app_metadata?.role;
+	const configuredAdminEmail = (process.env.ADMIN_EMAIL || process.env.VITE_ADMIN_EMAIL || "").trim().toLowerCase();
+	const userEmail = (data.user.email || "").trim().toLowerCase();
+	const isSuperAdmin = Boolean(configuredAdminEmail && userEmail === configuredAdminEmail);
+
+	if (role !== "admin" && !isSuperAdmin) {
 		return new Response(JSON.stringify({ error: "Account lacks administrative privileges." }), {
 			status: 403,
 			headers: { "Content-Type": "application/json" },

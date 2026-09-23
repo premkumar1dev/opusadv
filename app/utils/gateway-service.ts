@@ -32,7 +32,7 @@ import {
 } from "~/utils/user-key-service";
 import { logApiRequest, logFailover } from "~/utils/logging-service";
 import { recordHealthSuccess, recordHealthFailure } from "~/utils/health-service.server";
-import { calculateCredits, recordUsage } from "~/utils/usage-service";
+import { calculateCredits, recordUsage, estimateTokens } from "~/utils/usage-service";
 import { getGatewayConfig } from "~/utils/gateway-config";
 import { inferTokenLimitFromPlan } from "~/utils/plan-service";
 
@@ -352,24 +352,119 @@ function transformResponse(
 }
 
 // ---------------------------------------------------------------------------
-// Sanitize error message for client response (strip sensitive details)
+// Extract & sanitize error message for client response
 // ---------------------------------------------------------------------------
-function sanitizeErrorMessage(message: string, statusCode: number): string {
-	if (statusCode >= 500 && statusCode < 600) {
-		return 'Upstream provider error. Please try again.';
+function extractErrorMessage(responseBody: any, status: number): string {
+	if (!responseBody) return `HTTP ${status}`;
+	if (typeof responseBody === 'string') return responseBody;
+	if (typeof responseBody.error === 'string') return responseBody.error;
+	if (responseBody.error?.message) return responseBody.error.message;
+	if (typeof responseBody.message === 'string') return responseBody.message;
+	if (typeof responseBody.detail === 'string') return responseBody.detail;
+	if (responseBody.error?.detail) return responseBody.error.detail;
+	return `HTTP ${status}`;
+}
+
+function sanitizeErrorMessage(rawMessage: string, statusCode: number): string {
+	if (!rawMessage || typeof rawMessage !== 'string') {
+		return statusCode === 429
+			? 'Rate limit exceeded. Please retry after a moment.'
+			: statusCode >= 500
+			? 'Upstream provider error. Please retry shortly.'
+			: `Request failed with HTTP status ${statusCode}.`;
 	}
-	if (statusCode === 429) {
-		return 'Rate limit exceeded. Please retry after a moment.';
+
+	// Redact sensitive API keys if they appear in error messages
+	let cleaned = rawMessage
+		.replace(/sk-[a-zA-Z0-9_-]{16,}/g, 'sk-***')
+		.replace(/bearer\s+[a-zA-Z0-9_.-]+/gi, 'Bearer ***')
+		.trim();
+
+	const lower = cleaned.toLowerCase();
+	if (lower.includes('invalid api key') || lower.includes('invalid_api_key') || statusCode === 401) {
+		return `Authentication Error: Upstream provider rejected the API key (${cleaned}). Check credentials.`;
 	}
-	if (statusCode === 402 || statusCode === 413) {
-		return 'Request quota exceeded.';
+	if (statusCode === 429 || lower.includes('rate limit')) {
+		return `Rate Limit Exceeded: Upstream provider is temporarily rate limited. ${cleaned}`;
 	}
-	// Client errors: return only the message (already filtered upstream)
-	// but cap at 200 chars to prevent information disclosure
-	if (statusCode >= 400 && statusCode < 500) {
-		return message.length > 200 ? message.slice(0, 197) + '...' : message;
+	if (statusCode === 402 || lower.includes('quota') || lower.includes('credit')) {
+		return `Quota Exhausted: Upstream credits or quota exhausted. ${cleaned}`;
 	}
-	return 'Request failed. Please try again.';
+	if (lower.includes('model') && (lower.includes('not found') || lower.includes('does not exist'))) {
+		return `Model Error: ${cleaned}`;
+	}
+
+	if (cleaned.length > 500) {
+		cleaned = cleaned.slice(0, 497) + '...';
+	}
+
+	return cleaned || `Request failed with status ${statusCode}`;
+}
+
+function createMeteredStream(
+	sourceStream: ReadableStream<Uint8Array>,
+	messages: any[],
+	model: string,
+	onComplete: (usage: TokenUsage) => Promise<void> | void
+): ReadableStream<Uint8Array> {
+	let promptTokens = 0;
+	let completionTokens = 0;
+	const decoder = new TextDecoder();
+	let buffer = '';
+
+	const transformStream = new TransformStream<Uint8Array, Uint8Array>({
+		transform(chunk, controller) {
+			controller.enqueue(chunk);
+			try {
+				buffer += decoder.decode(chunk, { stream: true });
+				const lines = buffer.split('\n');
+				buffer = lines.pop() || '';
+
+				for (const line of lines) {
+					const trimmed = line.trim();
+					if (!trimmed || trimmed.startsWith(':')) continue;
+
+					if (trimmed.startsWith('data: ')) {
+						const jsonStr = trimmed.slice(6).trim();
+						if (jsonStr === '[DONE]') continue;
+						try {
+							const parsed = JSON.parse(jsonStr);
+							if (parsed.usage) {
+								if (typeof parsed.usage.prompt_tokens === 'number') promptTokens = parsed.usage.prompt_tokens;
+								if (typeof parsed.usage.completion_tokens === 'number') completionTokens = parsed.usage.completion_tokens;
+							}
+							if (parsed.type === 'message_start' && parsed.message?.usage) {
+								if (typeof parsed.message.usage.input_tokens === 'number') promptTokens = parsed.message.usage.input_tokens;
+							}
+							if (parsed.type === 'message_delta' && parsed.usage) {
+								if (typeof parsed.usage.output_tokens === 'number') completionTokens += parsed.usage.output_tokens;
+							}
+						} catch {
+							// SSE parsing error ignored
+						}
+					}
+				}
+			} catch {
+				// Chunk decode error ignored
+			}
+		},
+		async flush() {
+			try {
+				if (promptTokens === 0 && messages && messages.length > 0) {
+					promptTokens = estimateTokens(messages, model);
+				}
+				if (completionTokens === 0) {
+					completionTokens = Math.max(1, Math.ceil(buffer.length / 4));
+				}
+				const totalTokens = promptTokens + completionTokens;
+				await onComplete({ promptTokens, completionTokens, totalTokens });
+			} catch (err) {
+				console.error('[gateway] Error in metered stream flush:', err);
+			}
+		},
+	});
+
+	return sourceStream.pipeThrough(transformStream);
 }
 
 // ---------------------------------------------------------------------------
@@ -521,6 +616,13 @@ export async function handleGatewayRequest(
 		try {
 			const controller = new AbortController();
 			const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
+			if (ctx.signal) {
+				if (ctx.signal.aborted) {
+					controller.abort();
+				} else {
+					ctx.signal.addEventListener("abort", () => controller.abort(), { once: true });
+				}
+			}
 			response = await fetch(url, {
 				method: 'POST',
 				headers,
@@ -529,6 +631,30 @@ export async function handleGatewayRequest(
 			});
 			clearTimeout(timeoutId);
 		} catch (fetchErr: unknown) {
+			if (ctx.signal?.aborted) {
+				return {
+					requestId,
+					masterKeyId: candidate.id,
+					provider: candidate.provider,
+					httpStatus: 499,
+					isSuccess: false,
+					promptTokens: 0,
+					completionTokens: 0,
+					totalTokens: 0,
+					creditsUsed: 0,
+					responseTimeMs: Date.now() - fetchStart,
+					errorMessage: "Client cancelled the request.",
+					responseBody: {
+						type: "error",
+						error: {
+							type: "client_cancelled",
+							message: "Client closed the connection before completion.",
+						},
+					},
+					retryNumber,
+				};
+			}
+
 			let errorMsg: string;
 			if (fetchErr instanceof Error && fetchErr.name === 'AbortError') {
 				errorMsg = `Request timed out after ${requestTimeoutMs}ms`;
@@ -573,8 +699,66 @@ export async function handleGatewayRequest(
 			if (candidate.id !== 'passthrough') {
 				await markMasterKeySuccess(candidate.id);
 				await recordHealthSuccess(candidate.id, responseTimeMs);
-				await recordUsage(candidate.id, candidate.provider, 0, 0, responseTimeMs);
 			}
+
+			// Wrap stream with metering transform to count tokens and record usage
+			const meteredStream = createMeteredStream(
+				response.body as ReadableStream<Uint8Array>,
+				ctx.messages,
+				ctx.model,
+				async (finalUsage) => {
+					const userKey = ctx.userApiKey as any;
+					const planInputPrice = Number(userKey?.price_per_1m_input_tokens ?? 0);
+					const planOutputPrice = Number(userKey?.price_per_1m_output_tokens ?? 0);
+					const isPerTokenPlan = (userKey?.pricing_type === 'per_token') && !isNaN(planInputPrice) && !isNaN(planOutputPrice) && (planInputPrice > 0 || planOutputPrice > 0);
+
+					let credits: number;
+					if (isPerTokenPlan) {
+						credits = Math.round(
+							((finalUsage.promptTokens * planInputPrice) / 1_000_000 +
+								(finalUsage.completionTokens * planOutputPrice) / 1_000_000) * 10_000
+						) / 10_000;
+					} else {
+						credits = calculateCredits(ctx.model, finalUsage);
+					}
+
+					if (candidate.id !== 'passthrough') {
+						await recordUsage(candidate.id, candidate.provider, finalUsage.totalTokens, credits, responseTimeMs);
+					}
+
+					if (ctx.userApiKey?.id && ctx.userApiKey.id !== 'passthrough') {
+						const planPricing = isPerTokenPlan ? { input: planInputPrice, output: planOutputPrice } : null;
+						try {
+							await supabase.from('user_api_keys').update({
+								last_prompt_tokens: finalUsage.promptTokens,
+								last_completion_tokens: finalUsage.completionTokens,
+								total_prompt_tokens: ((userKey?.total_prompt_tokens ?? 0) + finalUsage.promptTokens),
+								total_completion_tokens: ((userKey?.total_completion_tokens ?? 0) + finalUsage.completionTokens),
+							}).eq('id', ctx.userApiKey.id);
+						} catch { /* best-effort */ }
+
+						await recordUserKeyUsage(ctx.userApiKey.id, finalUsage.totalTokens, credits, true, planPricing);
+
+						await logApiRequest({
+							requestId,
+							userId: ctx.userApiKey.user_id,
+							userApiKeyId: ctx.userApiKey.id,
+							userApiKeyPrefix: hashForLogging(ctx.userApiKey.api_key, 8),
+							masterApiKeyId: candidate.id,
+							masterKeyPrefix: hashForLogging(candidate.api_key, 4),
+							provider: candidate.provider,
+							model: ctx.model,
+							...finalUsage,
+							creditsUsed: credits,
+							responseTimeMs,
+							httpStatus: response.status,
+							isSuccess: true,
+							ipAddress: ctx.ipAddress,
+							userAgent: ctx.userAgent,
+						});
+					}
+				}
+			);
 
 			return {
 				requestId,
@@ -588,7 +772,7 @@ export async function handleGatewayRequest(
 				creditsUsed: 0,
 				responseTimeMs,
 				isStream: true,
-				stream: response.body,
+				stream: meteredStream,
 				contentType: contentType || 'text/event-stream',
 				responseBody: null,
 				retryNumber: retryNumber + 1,
@@ -763,7 +947,8 @@ export async function handleGatewayRequest(
 		}
 
 		// Error response
-		const errorMsg = (responseBody as any)?.error?.message ?? `HTTP ${response.status}`;
+		const extractedMsg = extractErrorMessage(responseBody, response.status);
+		const errorMsg = sanitizeErrorMessage(extractedMsg, response.status);
 		lastError = errorMsg;
 		lastStatusCode = response.status;
 

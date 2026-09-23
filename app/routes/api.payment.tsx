@@ -61,15 +61,55 @@ async function paymentAction(request: Request): Promise<Response> {
 
 	if (intent === "create_order") {
 		const customer_mobile = (formData.get("customer_mobile") as string) ?? "";
-		const amount = (formData.get("amount") as string) ?? "";
+		let amount = (formData.get("amount") as string) ?? "";
 		const order_id = (formData.get("order_id") as string) ?? "";
 		const redirect_url = (formData.get("redirect_url") as string) ?? "";
 		const remark1 = (formData.get("remark1") as string) ?? "";
 		const remark2 = (formData.get("remark2") as string) ?? "";
+		const plan_id = (formData.get("plan_id") as string) ?? "";
 
 		if (!order_id || !amount) {
 			return new Response(
 				JSON.stringify({ status: false, message: "Missing order_id or amount" }),
+				{ status: 400, headers: { "Content-Type": "application/json" } }
+			);
+		}
+
+		// Server-side validation of price against database to prevent client-side tampering
+		let serverPrice: number | null = null;
+		const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(order_id);
+		let orderQuery = supabase.from("orders").select("amount, plan_id, plan_name");
+		if (isUuid) {
+			orderQuery = orderQuery.or(`id.eq.${order_id},payment_ref.eq.${order_id}`);
+		} else {
+			orderQuery = orderQuery.eq("payment_ref", order_id);
+		}
+		const { data: existingOrder } = await orderQuery.maybeSingle();
+
+		if (existingOrder && existingOrder.amount != null) {
+			serverPrice = Number(existingOrder.amount);
+		} else {
+			let planQuery = supabase.from("plans").select("price, is_active");
+			if (plan_id) {
+				planQuery = planQuery.eq("id", plan_id);
+			} else if (remark1) {
+				planQuery = planQuery.eq("name", remark1);
+			}
+			const { data: matchedPlan } = await planQuery.maybeSingle();
+			if (matchedPlan && matchedPlan.price != null) {
+				serverPrice = Number(matchedPlan.price);
+			}
+		}
+
+		if (serverPrice !== null && serverPrice > 0) {
+			// Authoritative override: always charge the actual database plan price
+			amount = String(serverPrice);
+		}
+
+		const parsedAmount = Number(amount);
+		if (isNaN(parsedAmount) || parsedAmount <= 0) {
+			return new Response(
+				JSON.stringify({ status: false, message: "Invalid payment amount" }),
 				{ status: 400, headers: { "Content-Type": "application/json" } }
 			);
 		}

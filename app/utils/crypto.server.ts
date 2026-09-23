@@ -27,6 +27,9 @@ function getKey(): Buffer {
 		return deriveKey(raw);
 	}
 	// Fallback (dev only)
+	if (process.env.NODE_ENV === "production") {
+		throw new Error("[crypto.server] MAIL_ENCRYPTION_KEY environment variable is strictly required in production!");
+	}
 	const fallback = process.env.VITE_ADMIN_PASSWORD || "changeme-set-MAIL_ENCRYPTION_KEY";
 	return deriveKey(fallback);
 }

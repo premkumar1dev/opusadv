@@ -238,6 +238,7 @@ export async function action({ request }: ActionFunctionArgs) {
 			endpointPath: urlPath,
 			body,
 			headers: request.headers,
+			signal: request.signal,
 		};
 
 		// 4. Execute gateway with failover
@@ -274,12 +275,27 @@ export async function action({ request }: ActionFunctionArgs) {
 			});
 		} else {
 			const status = result.httpStatus >= 400 && result.httpStatus < 600 ? result.httpStatus : 500;
+			const upstreamErrorObj = (result.responseBody as any)?.error;
+			const rawMessage = typeof upstreamErrorObj === "string"
+				? upstreamErrorObj
+				: (upstreamErrorObj?.message || result.errorMessage || "Request failed");
+			const errorType = upstreamErrorObj?.type
+				|| (status === 401 ? "authentication_error"
+					: status === 403 ? "permission_error"
+					: status === 404 ? "not_found_error"
+					: status === 429 ? "rate_limit_error"
+					: status === 503 ? "service_unavailable"
+					: "api_error");
+
 			return data({
+				type: "error",
 				error: {
-					message: result.errorMessage ?? 'Request failed',
-					type: result.httpStatus === 503 ? 'service_unavailable' : 'api_error',
+					type: errorType,
+					message: rawMessage,
+					status,
 					request_id: requestId,
 					retries: result.retryNumber,
+					...(upstreamErrorObj && typeof upstreamErrorObj === "object" ? upstreamErrorObj : {}),
 				},
 			}, { status, headers: CORS_HEADERS });
 		}

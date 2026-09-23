@@ -15,7 +15,7 @@ export function generateNonce(): string {
 export function cspDirectives(nonce: string): string {
 	const directives = [
 		"default-src 'self'",
-		`script-src 'nonce-${nonce}' 'strict-dynamic' 'self' https://cdn.tailwindcss.com https://fonts.googleapis.com https://cdn.jsdelivr.net https://*.hcaptcha.com https://checkout.razorpay.com https://checkout.flutterwave.com https://polyfill.io https://cdn.rawgit.com`,
+		`script-src 'nonce-${nonce}' 'strict-dynamic' 'self' https://cdn.tailwindcss.com https://fonts.googleapis.com https://cdn.jsdelivr.net https://*.hcaptcha.com https://checkout.razorpay.com https://checkout.flutterwave.com`,
 		`style-src 'nonce-${nonce}' 'self' https://fonts.googleapis.com https://cdnjs.cloudflare.com 'unsafe-inline'`,
 		"font-src 'self' https://fonts.gstatic.com data:",
 		"img-src 'self' https: data: blob:",
