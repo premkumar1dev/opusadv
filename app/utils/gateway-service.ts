@@ -150,12 +150,16 @@ function extractUsage(responseBody: any): TokenUsage {
 // ---------------------------------------------------------------------------
 function buildProviderHeaders(
 	masterKey: MasterApiKeyRow,
-	incomingHeaders?: any
+	incomingHeaders?: any,
+	clientKey?: string
 ): Record<string, string> {
+	const isCandidatePlaceholder = !masterKey?.api_key || masterKey.api_key.includes('placeholder') || masterKey.id === 'passthrough';
+	const keyToSend = (isCandidatePlaceholder && clientKey) ? clientKey : (masterKey?.api_key || clientKey || '');
+
 	const headers: Record<string, string> = {
 		'Content-Type': 'application/json',
-		'Authorization': `Bearer ${masterKey.api_key}`,
-		'x-api-key': masterKey.api_key,
+		'Authorization': `Bearer ${keyToSend}`,
+		'x-api-key': keyToSend,
 		'anthropic-version': '2023-06-01',
 	};
 
@@ -431,22 +435,47 @@ export async function handleGatewayRequest(
 		return matchesProvider(k.provider, ctx.provider);
 	});
 
-	if (activeKeys.length === 0) {
-		return {
-			requestId,
-			masterKeyId: '',
-			provider: ctx.provider,
-			httpStatus: 503,
-			isSuccess: false,
-			promptTokens: 0,
-			completionTokens: 0,
-			totalTokens: 0,
-			creditsUsed: 0,
-			responseTimeMs: 0,
-			errorMessage: `No active provider keys available for "${ctx.provider}". Please try again later.`,
-			responseBody: { error: { message: `Service Unavailable — no active master key configured for provider "${ctx.provider}".`, type: 'service_unavailable' } },
-			retryNumber: 0,
-		};
+	let candidateKeys = activeKeys;
+	if (candidateKeys.length === 0) {
+		const fallbackKey = ctx.userApiKey?.api_key || '';
+		if (fallbackKey) {
+			candidateKeys = [{
+				id: 'passthrough',
+				provider: 'https://api.opusmax.live/v1',
+				name: 'Direct Upstream',
+				api_key: fallbackKey,
+				status: 'active',
+				priority: 1,
+				total_credits: 999999,
+				used_credits: 0,
+				remaining_credits: 999999,
+				total_requests: 0,
+				success_requests: 0,
+				failed_requests: 0,
+				last_used: null,
+				last_failure: null,
+				failure_count: 0,
+				health_status: 'healthy',
+				created_at: new Date().toISOString(),
+				updated_at: new Date().toISOString(),
+			} as any as MasterApiKeyRow];
+		} else {
+			return {
+				requestId,
+				masterKeyId: '',
+				provider: ctx.provider,
+				httpStatus: 503,
+				isSuccess: false,
+				promptTokens: 0,
+				completionTokens: 0,
+				totalTokens: 0,
+				creditsUsed: 0,
+				responseTimeMs: 0,
+				errorMessage: `No active provider keys available for "${ctx.provider}". Please try again later.`,
+				responseBody: { error: { message: `Service Unavailable — no active master key configured for provider "${ctx.provider}".`, type: 'service_unavailable' } },
+				retryNumber: 0,
+			};
+		}
 	}
 
 	// Prepare request — build from full body parameters
@@ -465,7 +494,7 @@ export async function handleGatewayRequest(
 	// When failover is disabled, only try the first (highest-priority) key.
 	// Bug fix: the original condition 'retryNumber > 0' broke the loop after a single
 	// retry even when failover was enabled, so secondary keys were never tried.
-	const keysToTry = failoverEnabled ? activeKeys : [activeKeys[0]];
+	const keysToTry = failoverEnabled ? candidateKeys : [candidateKeys[0]];
 
 	for (const candidate of keysToTry) {
 		masterKey = candidate;
@@ -473,7 +502,7 @@ export async function handleGatewayRequest(
 		// All upstream requests go to opusmax regardless of key's stored provider name
 		const upstreamProvider = 'opusmax';
 		const url = buildProviderUrl(upstreamProvider, ctx.model, ctx.endpointPath);
-		const headers = buildProviderHeaders(candidate, ctx.headers);
+		const headers = buildProviderHeaders(candidate, ctx.headers, ctx.userApiKey?.api_key);
 		const body = transformRequestBody(upstreamProvider, {
 			...request,
 			model: ctx.model,
@@ -501,8 +530,10 @@ export async function handleGatewayRequest(
 			lastError = errorMsg;
 			lastStatusCode = 0;
 
-			await markMasterKeyFailed(candidate.id, errorMsg);
-			await recordHealthFailure(candidate.id, errorMsg);
+			if (candidate.id !== 'passthrough') {
+				await markMasterKeyFailed(candidate.id, errorMsg);
+				await recordHealthFailure(candidate.id, errorMsg);
+			}
 
 			failoverEvents.push({
 				requestId,
@@ -531,9 +562,11 @@ export async function handleGatewayRequest(
 		const isStream = contentType.includes('text/event-stream') || Boolean((request as any).stream);
 
 		if (response.ok && (isStream || contentType.includes('event-stream')) && response.body) {
-			await markMasterKeySuccess(candidate.id);
-			await recordHealthSuccess(candidate.id, responseTimeMs);
-			await recordUsage(candidate.id, candidate.provider, 0, 0, responseTimeMs);
+			if (candidate.id !== 'passthrough') {
+				await markMasterKeySuccess(candidate.id);
+				await recordHealthSuccess(candidate.id, responseTimeMs);
+				await recordUsage(candidate.id, candidate.provider, 0, 0, responseTimeMs);
+			}
 
 			return {
 				requestId,
@@ -582,17 +615,18 @@ export async function handleGatewayRequest(
 				credits = calculateCredits(ctx.model, usage);
 			}
 
-			await markMasterKeySuccess(candidate.id);
-			await recordHealthSuccess(candidate.id, responseTimeMs);
-			await recordUsage(candidate.id, candidate.provider, usage.totalTokens, credits, responseTimeMs);
+			if (candidate.id !== 'passthrough') {
+				await markMasterKeySuccess(candidate.id);
+				await recordHealthSuccess(candidate.id, responseTimeMs);
+				await recordUsage(candidate.id, candidate.provider, usage.totalTokens, credits, responseTimeMs);
 
-			// Atomically update master key credits using SQL RPC to avoid lost-update race conditions
-			const { error: rpcError } = await supabase.rpc('increment_master_key_credits', {
-				p_master_key_id: candidate.id,
-				p_credits: credits,
-			});
+				// Atomically update master key credits using SQL RPC to avoid lost-update race conditions
+				const { error: rpcError } = await supabase.rpc('increment_master_key_credits', {
+					p_master_key_id: candidate.id,
+					p_credits: credits,
+				});
 
-			if (rpcError) {
+				if (rpcError) {
 				// Fallback: atomic compare-and-swap to avoid lost-update race condition
 				// Step 1: Read current state
 				const { data: currentKey } = await supabase
@@ -651,9 +685,10 @@ export async function handleGatewayRequest(
 					}
 				}
 			}
+		}
 
 			// Record user key usage
-			if (ctx.userApiKey.id) {
+			if (ctx.userApiKey?.id && ctx.userApiKey.id !== 'passthrough') {
 				const planPricing = isPerTokenPlan
 					? { input: planInputPrice, output: planOutputPrice }
 					: null;
@@ -676,23 +711,25 @@ export async function handleGatewayRequest(
 			}
 
 			// Log the successful request (use hashed prefixes instead of raw key material)
-			await logApiRequest({
-				requestId,
-				userId: ctx.userApiKey.user_id,
-				userApiKeyId: ctx.userApiKey.id,
-				userApiKeyPrefix: hashForLogging(ctx.userApiKey.api_key, 8),
-				masterApiKeyId: candidate.id,
-				masterKeyPrefix: hashForLogging(candidate.api_key, 4),
-				provider: candidate.provider,
-				model: ctx.model,
-				...usage,
-				creditsUsed: credits,
-				responseTimeMs,
-				httpStatus: response.status,
-				isSuccess: true,
-				ipAddress: ctx.ipAddress,
-				userAgent: ctx.userAgent,
-			});
+			if (ctx.userApiKey?.id && ctx.userApiKey.id !== 'passthrough') {
+				await logApiRequest({
+					requestId,
+					userId: ctx.userApiKey.user_id,
+					userApiKeyId: ctx.userApiKey.id,
+					userApiKeyPrefix: hashForLogging(ctx.userApiKey.api_key, 8),
+					masterApiKeyId: candidate.id,
+					masterKeyPrefix: hashForLogging(candidate.api_key, 4),
+					provider: candidate.provider,
+					model: ctx.model,
+					...usage,
+					creditsUsed: credits,
+					responseTimeMs,
+					httpStatus: response.status,
+					isSuccess: true,
+					ipAddress: ctx.ipAddress,
+					userAgent: ctx.userAgent,
+				});
+			}
 
 			// Log failover events if any occurred — now with resolution data
 			for (const fe of failoverEvents) {

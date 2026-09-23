@@ -5,6 +5,7 @@
 import { supabaseServer as supabase } from "~/utils/supabase.server";
 import crypto from "node:crypto";
 import type { UserApiKeyRow, UserApiKeyInput } from "~/types/gateway";
+export type { UserApiKeyRow, UserApiKeyInput };
 
 const KEY_PREFIX = "sk_live_";
 

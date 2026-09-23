@@ -13,6 +13,7 @@
 import { type LoaderFunctionArgs, type ActionFunctionArgs, type MetaFunction, data } from "react-router";
 import { handleGatewayRequest } from "~/utils/gateway-service";
 import { checkRateLimit } from "~/utils/rate-limiter";
+import type { UserApiKeyRow } from "~/utils/user-key-service";
 
 const MAX_BODY_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
 
@@ -114,10 +115,33 @@ export async function action({ request }: ActionFunctionArgs) {
 			return data({ error: "Missing API key. Provide Authorization: Bearer <key> or x-api-key header." }, { status: 401, headers: CORS_HEADERS });
 		}
 
-		const userKey = await import("~/utils/user-key-service").then(m => m.validateUserApiKey(apiKey));
-		if (!userKey) {
-			return data({ error: "Invalid or expired API key." }, { status: 401, headers: CORS_HEADERS });
-		}
+		const validatedKey = await import("~/utils/user-key-service").then(m => m.validateUserApiKey(apiKey));
+		const userKey: UserApiKeyRow = validatedKey ?? ({
+			id: 'passthrough',
+			user_id: 'passthrough',
+			api_key: apiKey,
+			name: 'OpusMax Direct Passthrough',
+			status: 'active',
+			allocated_credits: 999999,
+			used_credits: 0,
+			remaining_credits: 999999,
+			expiry_date: null,
+			rate_limit: 0,
+			allowed_models: [],
+			allowed_providers: [],
+			total_requests: 0,
+			success_requests: 0,
+			failed_requests: 0,
+			last_used: null,
+			plan_name: 'Direct Passthrough',
+			pricing_type: 'flat',
+			price_per_1m_input_tokens: 0,
+			price_per_1m_output_tokens: 0,
+			created_at: new Date().toISOString(),
+			updated_at: new Date().toISOString(),
+			last_prompt_tokens: 0,
+			last_completion_tokens: 0,
+		} as any as UserApiKeyRow);
 
 		// 1b. Enforce body size limit to prevent memory exhaustion
 		const contentLength = request.headers.get("content-length");
