@@ -23,36 +23,61 @@ interface RateLimitRow {
 
 const MAX_SAFE_REMAINING = 999999; // sentinel for "unlimited" remaining
 
+const memoryBuckets = new Map<string, { count: number; windowStart: number }>();
+
 /**
  * Returns true if the request is within the rate limit for this key.
- * Uses an atomic RPC to check-and-increment in a single transaction.
+ * Uses an atomic RPC to check-and-increment in a single transaction,
+ * with fallback to an in-memory sliding window if RPC is missing.
  */
 export async function checkRateLimit(
 	userApiKeyId: string,
 	limit: number
 ): Promise<{ allowed: boolean; remaining: number; retryAfter?: number }> {
-	if (!limit || limit <= 0) {
+	if (!limit || limit <= 0 || userApiKeyId === 'passthrough') {
 		return { allowed: true, remaining: MAX_SAFE_REMAINING };
 	}
 
-	// Use the atomic RPC function — single DB round-trip, no race condition
-	const { data, error } = await supabase.rpc(RPC_FUNCTION, {
-		p_user_api_key_id: userApiKeyId,
-		p_limit: limit,
-		p_window_seconds: WINDOW_SECONDS,
-	});
+	try {
+		// Use the atomic RPC function — single DB round-trip, no race condition
+		const { data, error } = await supabase.rpc(RPC_FUNCTION, {
+			p_user_api_key_id: userApiKeyId,
+			p_limit: limit,
+			p_window_seconds: WINDOW_SECONDS,
+		});
 
-	if (error || !data) {
-		console.error("[rateLimiter] Atomic RPC failed:", error);
-		// Fail-closed: reject the request when rate-limit check fails
-		return { allowed: false, remaining: 0 };
+		if (!error && data) {
+			const result = data as { allowed: boolean; remaining: number; retry_after: number | null };
+			return {
+				allowed: result.allowed,
+				remaining: result.remaining,
+				...(result.retry_after ? { retryAfter: result.retry_after } : {}),
+			};
+		}
+	} catch (err) {
+		console.warn("[rateLimiter] DB RPC call threw, falling back to memory:", err);
 	}
 
-	const result = data as { allowed: boolean; remaining: number; retry_after: number | null };
+	// In-memory sliding window fallback if RPC does not exist in schema cache
+	const now = Math.floor(Date.now() / 1000);
+	const entry = memoryBuckets.get(userApiKeyId) || { count: 0, windowStart: now };
+	if (now - entry.windowStart >= WINDOW_SECONDS) {
+		entry.count = 1;
+		entry.windowStart = now;
+		memoryBuckets.set(userApiKeyId, entry);
+		return { allowed: true, remaining: Math.max(0, limit - 1) };
+	}
+
+	if (entry.count < limit) {
+		entry.count += 1;
+		memoryBuckets.set(userApiKeyId, entry);
+		return { allowed: true, remaining: Math.max(0, limit - entry.count) };
+	}
+
 	return {
-		allowed: result.allowed,
-		remaining: result.remaining,
-		...(result.retry_after ? { retryAfter: result.retry_after } : {}),
+		allowed: false,
+		remaining: 0,
+		retryAfter: Math.max(1, WINDOW_SECONDS - (now - entry.windowStart)),
 	};
 }
 

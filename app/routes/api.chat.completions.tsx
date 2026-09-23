@@ -183,8 +183,8 @@ export async function action({ request }: ActionFunctionArgs) {
 			}
 		}
 
-		// 3d. Rate limiting (Supabase-backed sliding window)
-		if (userKey.rate_limit && userKey.rate_limit > 0) {
+		// 3d. Rate limiting (Supabase-backed sliding window with memory fallback)
+		if (userKey.id !== 'passthrough' && userKey.rate_limit && userKey.rate_limit > 0) {
 			const rateResult = await checkRateLimit(userKey.id, userKey.rate_limit);
 			if (!rateResult.allowed) {
 				return data({
