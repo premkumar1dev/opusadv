@@ -1,18 +1,18 @@
-# Claude Desktop Gateway Connection Diagnostic Report
+# Claude Desktop Gateway Connection & Architecture Guide
 
 **Generated:** September 24, 2026  
-**Status:** Diagnostic Complete & Verified  
+**Status:** Architecture Fixed & Tested (Commit `96fb3081`)  
 
 ---
 
 ## Executive Summary
 
-When testing the connection in **Claude Desktop** using the custom inference gateway settings, the connection test returns a **Red Dot (`Connection Failed`)**. 
+The OpusZen API Gateway architecture has been permanently repaired to work properly with Claude Desktop and Anthropic-compatible clients according to strict security, CORS, and tenant isolation specifications:
 
-A deep forensic network and server investigation identified **three distinct root causes**:
-1. **Critical CORS Preflight Crash on `api.opuszen.shop`**: The preflight proxy crashes with `HTTP 500: Not allowed by CORS`, blocking Electron/Chromium before any request payload is sent.
-2. **Expired Upstream Master Key on `api.opusmax.live`**: The master key `sk-ant-opm-l9C8jZuyDUlbaQeWZ0ciyfwZLG8DEKcP` is rejected by OpusMax with `⚠️ Invalid API key`.
-3. **Domain Routing & Key Authority Mismatch**: `https://api.opuszen.shop` bypasses the OpusZen authentication backend and forwards requests directly to OpusMax, which rejects all OpusZen `sk_live_...` keys.
+1. **CORS Preflight Standardized (`204 No Content`)**: Handled before authentication. Electron/Chromium `Origin: http://localhost` preflights return `204 No Content` with all required headers.
+2. **Customer Key Authentication Enforced (`sk_live_...`)**: All customer keys are authenticated against Supabase `user_api_keys`. Invalid keys, expired keys, or out-of-credit keys are terminated immediately without reaching upstream.
+3. **Provider Secrets Protected Server-Side**: Upstream master credentials (`OPUSMAX_API_KEY` or `master_api_keys`) are isolated on the server. Customer keys are strictly prevented from ever being forwarded upstream.
+4. **Vercel Edge & Domain Alignment**: Edge CORS headers added to `vercel.json` for all API and v1 routes. Claude Desktop can connect directly to `https://www.opuszen.shop` (or `https://api.opuszen.shop` once domain aliasing is updated in Vercel).
 
 ---
 
