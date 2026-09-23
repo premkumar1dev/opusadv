@@ -51,45 +51,95 @@ export async function createUserApiKey(input: UserApiKeyInput): Promise<UserApiK
  return data as UserApiKeyRow;
 }
 
-export async function validateUserApiKey(apiKey: string): Promise<UserApiKeyRow | null> {
-	if (!apiKey) return null;
+export interface KeyValidationResult {
+	valid: boolean;
+	key?: UserApiKeyRow;
+	status: number;
+	error?: string;
+	errorType?: string;
+}
+
+export async function validateUserApiKeyDetailed(apiKey: string): Promise<KeyValidationResult> {
+	if (!apiKey) {
+		return {
+			valid: false,
+			status: 401,
+			error: "Missing API key. Provide Authorization: Bearer <key> or x-api-key header.",
+			errorType: "authentication_error",
+		};
+	}
+
 	const cleanKey = apiKey
 		.trim()
 		.replace(/^Bearer\s+/i, "")
 		.trim()
 		.replace(/^["']|["']$/g, "")
 		.trim();
-	if (!cleanKey) return null;
+
+	if (!cleanKey) {
+		return {
+			valid: false,
+			status: 401,
+			error: "Empty API key provided.",
+			errorType: "authentication_error",
+		};
+	}
 
 	const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanKey);
 
-	// 1. Supabase PostgREST read-check-expire pattern for user keys
+	// 1. Check user_api_keys table
 	const { data, error } = await supabase
 		.from('user_api_keys')
 		.select('*')
 		.or(isUuid ? `api_key.eq.${cleanKey},id.eq.${cleanKey}` : `api_key.eq.${cleanKey}`)
-		.eq('status', 'active')
 		.maybeSingle();
 
 	if (data && !error) {
 		const key = data as UserApiKeyRow;
 
 		// Check expiry
-		if (key.expiry_date && new Date(key.expiry_date) < new Date()) {
-			await supabase.from('user_api_keys').update({ status: 'expired' }).eq('id', key.id);
-			return null;
+		if (key.status === 'expired' || (key.expiry_date && new Date(key.expiry_date) < new Date())) {
+			if (key.status !== 'expired') {
+				await supabase.from('user_api_keys').update({ status: 'expired' }).eq('id', key.id);
+			}
+			return {
+				valid: false,
+				status: 401,
+				error: "OpusZen API key has expired. Please renew your subscription or generate a new key.",
+				errorType: "authentication_error",
+			};
 		}
 
 		// Check credit depletion
-		if (key.allocated_credits > 0 && key.remaining_credits <= 0) {
-			await supabase.from('user_api_keys').update({ status: 'disabled' }).eq('id', key.id);
-			return null;
+		if (key.status === 'disabled' || (key.allocated_credits > 0 && (key.remaining_credits ?? 0) <= 0)) {
+			if (key.status !== 'disabled') {
+				await supabase.from('user_api_keys').update({ status: 'disabled' }).eq('id', key.id);
+			}
+			return {
+				valid: false,
+				status: 402,
+				error: "Insufficient credits. Your OpusZen credit balance is exhausted. Please top up your account.",
+				errorType: "quota_exceeded",
+			};
 		}
 
-		return key;
+		if (key.status === 'revoked') {
+			return {
+				valid: false,
+				status: 403,
+				error: "OpusZen API key has been revoked. Please generate a new key.",
+				errorType: "permission_error",
+			};
+		}
+
+		return {
+			valid: true,
+			key,
+			status: 200,
+		};
 	}
 
-	// 2. Also check master_api_keys table (for direct upstream master key inference & connection testing)
+	// 2. Also check master_api_keys table (for direct admin testing)
 	try {
 		const { getAllMasterKeys } = await import("~/utils/master-key-service");
 		const allMasters = await getAllMasterKeys().catch(() => []);
@@ -97,35 +147,51 @@ export async function validateUserApiKey(apiKey: string): Promise<UserApiKeyRow 
 
 		if (masterData) {
 			return {
-				id: masterData.id,
-				user_id: 'master_admin',
-				api_key: masterData.api_key,
-				name: masterData.name || 'Master Gateway Key',
-				status: 'active',
-				allocated_credits: masterData.total_credits || 999999,
-				used_credits: masterData.used_credits || 0,
-				remaining_credits: masterData.remaining_credits || masterData.total_credits || 999999,
-				expiry_date: null,
-				rate_limit: 10000,
-				allowed_models: [],
-				allowed_providers: [],
-				total_requests: masterData.total_requests || 0,
-				success_requests: masterData.success_requests || 0,
-				failed_requests: masterData.failed_requests || 0,
-				last_used: masterData.last_used || null,
-				plan_name: 'Enterprise Master',
-				pricing_type: 'per_request',
-				price_per_1m_input_tokens: 0,
-				price_per_1m_output_tokens: 0,
-				created_at: masterData.created_at || new Date().toISOString(),
-				updated_at: masterData.updated_at || new Date().toISOString(),
-			} as unknown as UserApiKeyRow;
+				valid: true,
+				key: {
+					id: masterData.id,
+					user_id: 'master_admin',
+					api_key: masterData.api_key,
+					name: masterData.name || 'Master Gateway Key',
+					status: 'active',
+					allocated_credits: masterData.total_credits || 999999,
+					used_credits: masterData.used_credits || 0,
+					remaining_credits: masterData.remaining_credits || masterData.total_credits || 999999,
+					expiry_date: null,
+					rate_limit: 10000,
+					allowed_models: [],
+					allowed_providers: [],
+					total_requests: masterData.total_requests || 0,
+					success_requests: masterData.success_requests || 0,
+					failed_requests: masterData.failed_requests || 0,
+					last_used: masterData.last_used || null,
+					plan_name: 'Enterprise Master',
+					pricing_type: 'per_request',
+					price_per_1m_input_tokens: 0,
+					price_per_1m_output_tokens: 0,
+					created_at: masterData.created_at || new Date().toISOString(),
+					updated_at: masterData.updated_at || new Date().toISOString(),
+				} as unknown as UserApiKeyRow,
+				status: 200,
+			};
 		}
 	} catch {
 		// ignore
 	}
 
-	return null;
+	return {
+		valid: false,
+		status: 401,
+		error: cleanKey.startsWith(KEY_PREFIX)
+			? "Invalid OpusZen API key. The key provided is not recognized by the gateway."
+			: "Invalid API key provided.",
+		errorType: "authentication_error",
+	};
+}
+
+export async function validateUserApiKey(apiKey: string): Promise<UserApiKeyRow | null> {
+	const result = await validateUserApiKeyDetailed(apiKey);
+	return result.valid ? (result.key ?? null) : null;
 }
 
 export async function getUserApiKeys(userId: string): Promise<UserApiKeyRow[]> {

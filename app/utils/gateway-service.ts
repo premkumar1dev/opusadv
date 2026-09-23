@@ -153,15 +153,12 @@ function buildProviderHeaders(
 	incomingHeaders?: any,
 	clientKey?: string
 ): Record<string, string> {
-	let keyToSend = '';
-	if (clientKey && (clientKey.startsWith('sk-ant-') || clientKey.startsWith('sk-proj-') || masterKey.id === 'passthrough' || !masterKey?.api_key || masterKey.api_key.includes('placeholder'))) {
-		// Client provided a direct upstream provider key (e.g. Claude Desktop) or passthrough key
-		keyToSend = clientKey;
-	} else if (masterKey?.api_key && !masterKey.api_key.includes('placeholder')) {
-		// Customer key (e.g. sk_live_...) — map to configured upstream master key
-		keyToSend = masterKey.api_key;
-	} else {
-		keyToSend = clientKey || '';
+	// The provider key sent upstream is ALWAYS the server-side provider credential
+	let keyToSend = masterKey?.api_key || '';
+
+	// STRICT ARCHITECTURAL RULE: Customer keys (sk_live_...) must NEVER be sent upstream!
+	if (keyToSend.startsWith('sk_live_')) {
+		keyToSend = '';
 	}
 
 	const headers: Record<string, string> = {
@@ -521,10 +518,37 @@ export async function handleGatewayRequest(
 		return false;
 	};
 
-	// Get all active master keys sorted by priority
+	// 1. Check server-side environment variable OPUSMAX_API_KEY
+	const envKey = (typeof process !== 'undefined' && process.env?.OPUSMAX_API_KEY) ? process.env.OPUSMAX_API_KEY.trim() : "";
+	const envCandidates: MasterApiKeyRow[] = [];
+	if (envKey && !envKey.startsWith("sk_live_")) {
+		envCandidates.push({
+			id: "env_opusmax",
+			provider: "opusmax",
+			name: "Server Environment OPUSMAX_API_KEY",
+			api_key: envKey,
+			status: "active",
+			priority: 0,
+			total_credits: 999999999,
+			used_credits: 0,
+			remaining_credits: 999999999,
+			total_requests: 0,
+			success_requests: 0,
+			failed_requests: 0,
+			last_used: null,
+			last_failure: null,
+			failure_count: 0,
+			health_status: "healthy",
+			created_at: new Date().toISOString(),
+			updated_at: new Date().toISOString(),
+		} as any as MasterApiKeyRow);
+	}
+
+	// 2. Get all active master keys from DB sorted by priority
 	const allKeys = await getAllMasterKeys();
 	const activeKeys = allKeys.filter((k) => {
 		if (k.api_key === '[encrypted — decryption failed]') return false;
+		if (k.api_key?.startsWith('sk_live_')) return false; // Prevent customer keys in master list
 		const isHealthy = k.status === 'active'
 			&& !['quota_exhausted', 'rate_limited', 'temporarily_failed', 'disabled'].includes(k.health_status)
 			&& (k.remaining_credits ?? 0) > 0;
@@ -538,47 +562,31 @@ export async function handleGatewayRequest(
 		return matchesProvider(k.provider, ctx.provider);
 	});
 
-	let candidateKeys = activeKeys;
+	const candidateKeys = [...envCandidates, ...activeKeys];
 	if (candidateKeys.length === 0) {
-		const fallbackKey = ctx.userApiKey?.api_key || '';
-		if (fallbackKey) {
-			candidateKeys = [{
-				id: 'passthrough',
-				provider: 'https://api.opusmax.live/v1',
-				name: 'Direct Upstream',
-				api_key: fallbackKey,
-				status: 'active',
-				priority: 1,
-				total_credits: 999999,
-				used_credits: 0,
-				remaining_credits: 999999,
-				total_requests: 0,
-				success_requests: 0,
-				failed_requests: 0,
-				last_used: null,
-				last_failure: null,
-				failure_count: 0,
-				health_status: 'healthy',
-				created_at: new Date().toISOString(),
-				updated_at: new Date().toISOString(),
-			} as any as MasterApiKeyRow];
-		} else {
-			return {
-				requestId,
-				masterKeyId: '',
-				provider: ctx.provider,
-				httpStatus: 503,
-				isSuccess: false,
-				promptTokens: 0,
-				completionTokens: 0,
-				totalTokens: 0,
-				creditsUsed: 0,
-				responseTimeMs: 0,
-				errorMessage: `No active provider keys available for "${ctx.provider}". Please try again later.`,
-				responseBody: { error: { message: `Service Unavailable — no active master key configured for provider "${ctx.provider}".`, type: 'service_unavailable' } },
-				retryNumber: 0,
-			};
-		}
+		console.warn(`[GATEWAY] NO PROVIDER KEYS AVAILABLE | provider="${ctx.provider}" id=${requestId}`);
+		return {
+			requestId,
+			masterKeyId: '',
+			provider: ctx.provider,
+			httpStatus: 502,
+			isSuccess: false,
+			promptTokens: 0,
+			completionTokens: 0,
+			totalTokens: 0,
+			creditsUsed: 0,
+			responseTimeMs: 0,
+			errorMessage: `OpusZen Gateway upstream provider key is not configured or inactive. Please set OPUSMAX_API_KEY in the environment or configure an active provider key in the admin dashboard.`,
+			responseBody: {
+				type: "error",
+				error: {
+					type: "service_unavailable",
+					message: `OpusZen Gateway upstream provider key is not configured or inactive. Please set OPUSMAX_API_KEY in the environment or configure an active provider key in the admin dashboard.`,
+					status: 502,
+				},
+			},
+			retryNumber: 0,
+		};
 	}
 
 	// Prepare request — build from full body parameters
@@ -595,8 +603,6 @@ export async function handleGatewayRequest(
 	let masterKey: MasterApiKeyRow | null = null;
 
 	// When failover is disabled, only try the first (highest-priority) key.
-	// Bug fix: the original condition 'retryNumber > 0' broke the loop after a single
-	// retry even when failover was enabled, so secondary keys were never tried.
 	const keysToTry = failoverEnabled ? candidateKeys : [candidateKeys[0]];
 
 	for (const candidate of keysToTry) {
@@ -610,6 +616,9 @@ export async function handleGatewayRequest(
 			...request,
 			model: ctx.model,
 		});
+
+		console.log(`[GATEWAY] PROVIDER SELECTED | provider=${upstreamProvider} keySource=${candidate.id.startsWith('env') ? 'env' : 'database'} model=${ctx.model} id=${requestId}`);
+		console.log(`[GATEWAY] UPSTREAM REQUEST START | url=${url} model=${ctx.model} stream=${Boolean((request as any).stream)} id=${requestId}`);
 
 		const fetchStart = Date.now();
 		let response: Response;
@@ -692,6 +701,7 @@ export async function handleGatewayRequest(
 		}
 
 		const responseTimeMs = Date.now() - fetchStart;
+		console.log(`[GATEWAY] UPSTREAM STATUS | status=${response.status} timeMs=${responseTimeMs} id=${requestId}`);
 		const contentType = response.headers.get('content-type') || '';
 		const isStream = contentType.includes('text/event-stream') || Boolean((request as any).stream);
 

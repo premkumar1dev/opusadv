@@ -14,7 +14,26 @@ const BUILTIN_ALLOWED_ORIGINS = [
 	"https://api.opusmax.live",
 	"https://opuszen.ai",
 	"https://www.opuszen.ai",
+	"http://localhost",
+	"http://localhost:3000",
+	"http://localhost:5173",
+	"http://127.0.0.1",
+	"http://127.0.0.1:3000",
+	"http://127.0.0.1:5173",
+	"capacitor://localhost",
+	"electron://desktop",
 ];
+
+function isOriginAllowed(origin: string | null): boolean {
+	if (!origin || origin === "null") return true;
+	const allowed = getAllowedOrigins();
+	if (allowed.includes(origin)) return true;
+	// Localhost and local IP patterns for desktop/dev tools (Claude Desktop, Electron, etc.)
+	if (/^https?:\/\/localhost(:\d+)?$/i.test(origin)) return true;
+	if (/^https?:\/\/127\.0\.0\.1(:\d+)?$/i.test(origin)) return true;
+	if (/^(capacitor|electron|tauri|vscode-webview):\/\//i.test(origin)) return true;
+	return false;
+}
 
 function parseAllowedOrigins(): string[] {
 	const envOrigins =
@@ -48,16 +67,22 @@ export function resetCorsCache(): void {
 }
 
 export function corsHeaders(origin: string | null): Record<string, string> {
-	const allowed = getAllowedOrigins();
 	const headers: Record<string, string> = {
 		"Access-Control-Allow-Methods": "GET, POST, OPTIONS, HEAD, PUT, DELETE",
-		"Access-Control-Allow-Headers": "Authorization, Content-Type, x-api-key, anthropic-version, x-goog-api-key, X-Request-Id, X-Requested-With, Accept, api-key",
+		"Access-Control-Allow-Headers": "Authorization, Content-Type, x-api-key, anthropic-version, anthropic-beta, x-goog-api-key, X-Request-Id, X-Requested-With, Accept, api-key",
 		"Access-Control-Max-Age": "86400",
 	};
 
-	if (origin && allowed.includes(origin)) {
-		headers["Access-Control-Allow-Origin"] = origin;
-		headers["Vary"] = "Origin";
+	if (origin && origin !== "null") {
+		if (isOriginAllowed(origin)) {
+			headers["Access-Control-Allow-Origin"] = origin;
+			headers["Access-Control-Allow-Credentials"] = "true";
+			headers["Vary"] = "Origin";
+		} else {
+			headers["Access-Control-Allow-Origin"] = "*";
+		}
+	} else {
+		headers["Access-Control-Allow-Origin"] = "*";
 	}
 
 	return headers;
