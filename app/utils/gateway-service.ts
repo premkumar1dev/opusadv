@@ -787,6 +787,45 @@ export async function handleGatewayRequest(
 			responseBody = { error: { message: text || `HTTP ${response.status}` } };
 		}
 
+		// Detect pseudo-success error messages from upstream (e.g. OpusMax returning 200 OK with "⚠️ Invalid API key")
+		const assistantText = (responseBody as any)?.content?.[0]?.text
+			|| (responseBody as any)?.choices?.[0]?.message?.content
+			|| '';
+		const isPseudoAuthError = typeof assistantText === 'string' && (
+			assistantText.includes('⚠️ Invalid API key') ||
+			assistantText.includes('Invalid API key') ||
+			assistantText.includes('API key is missing')
+		);
+
+		if (isPseudoAuthError) {
+			const pseudoMsg = `Upstream provider (api.opusmax.live) rejected the key: "${assistantText.trim()}". Please provide a valid active key.`;
+			lastError = pseudoMsg;
+			lastStatusCode = 401;
+
+			if (candidate.id !== 'passthrough') {
+				await markMasterKeyFailed(candidate.id, pseudoMsg);
+				await recordHealthFailure(candidate.id, pseudoMsg);
+			}
+
+			failoverEvents.push({
+				requestId,
+				originalKeyId: candidate.id,
+				newKeyId: '',
+				originalProvider: candidate.provider,
+				newProvider: '',
+				failureReason: pseudoMsg,
+				httpStatus: 401,
+				errorMessage: pseudoMsg,
+				retryNumber: retryNumber + 1,
+				model: ctx.model,
+				ipAddress: ctx.ipAddress,
+			});
+
+			retryNumber++;
+			if (retryNumber >= maxRetries || !failoverEnabled) break;
+			continue;
+		}
+
 		if (response.ok) {
 			// Success
 			const usage = extractUsage(responseBody as ChatCompletionResponse);
