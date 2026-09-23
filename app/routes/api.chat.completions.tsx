@@ -108,7 +108,40 @@ export async function action({ request }: ActionFunctionArgs) {
 
 	try {
 		// 1. Extract and validate user or master API key
-		const authHeader = request.headers.get("authorization") ?? request.headers.get("Authorization") ?? request.headers.get("x-api-key") ?? request.headers.get("api-key") ?? "";
+		let authHeader = request.headers.get("authorization")
+			?? request.headers.get("Authorization")
+			?? request.headers.get("x-authorization")
+			?? request.headers.get("x-api-key")
+			?? request.headers.get("api-key")
+			?? "";
+
+		if (!authHeader) {
+			const sc = request.headers.get("x-vercel-sc-headers");
+			if (sc) {
+				try {
+					const parsed = JSON.parse(sc);
+					authHeader = parsed["authorization"] || parsed["Authorization"] || parsed["x-authorization"] || parsed["x-api-key"] || parsed["api-key"] || "";
+				} catch {}
+			}
+		}
+
+		if (!authHeader) {
+			for (const [k, v] of request.headers.entries()) {
+				const lower = k.toLowerCase();
+				if (lower === "authorization" || lower === "x-api-key" || lower === "api-key" || lower === "x-authorization") {
+					authHeader = v;
+					break;
+				}
+			}
+		}
+
+		if (!authHeader) {
+			try {
+				const url = new URL(request.url);
+				authHeader = url.searchParams.get("api_key") || url.searchParams.get("key") || "";
+			} catch {}
+		}
+
 		const apiKey = authHeader.replace(/^Bearer\s+/i, "").trim();
 
 		if (!apiKey) {

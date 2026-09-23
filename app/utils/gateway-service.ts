@@ -153,8 +153,16 @@ function buildProviderHeaders(
 	incomingHeaders?: any,
 	clientKey?: string
 ): Record<string, string> {
-	const isCandidatePlaceholder = !masterKey?.api_key || masterKey.api_key.includes('placeholder') || masterKey.id === 'passthrough';
-	const keyToSend = (isCandidatePlaceholder && clientKey) ? clientKey : (masterKey?.api_key || clientKey || '');
+	let keyToSend = '';
+	if (clientKey && (clientKey.startsWith('sk-ant-') || clientKey.startsWith('sk-proj-') || masterKey.id === 'passthrough' || !masterKey?.api_key || masterKey.api_key.includes('placeholder'))) {
+		// Client provided a direct upstream provider key (e.g. Claude Desktop) or passthrough key
+		keyToSend = clientKey;
+	} else if (masterKey?.api_key && !masterKey.api_key.includes('placeholder')) {
+		// Customer key (e.g. sk_live_...) — map to configured upstream master key
+		keyToSend = masterKey.api_key;
+	} else {
+		keyToSend = clientKey || '';
+	}
 
 	const headers: Record<string, string> = {
 		'Content-Type': 'application/json',
