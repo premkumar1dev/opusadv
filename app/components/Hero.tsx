@@ -4,6 +4,7 @@ import { Link } from "react-router";
 import { TextRevealLine } from "../components/motion/TextReveal";
 import { BlurReveal } from "../components/motion/BlurScaleReveal";
 import { ScrollSection } from "../components/motion/ScrollSection";
+import ConstellationGrid from "@/components/ui/constellation-grid";
 
 const DOTS = [
   { color: "bg-red-500", label: "API" },
@@ -132,16 +133,10 @@ export default function Hero() {
       ref={wrapperRef}
       className="relative min-h-[90vh] flex items-center justify-center bg-background pt-24 pb-16 overflow-hidden"
     >
-      {/* Background grid */}
-      <div
-        ref={gridRef}
-        className="absolute inset-0 opacity-40 pointer-events-none"
-        style={{
-          backgroundImage:
-            "linear-gradient(rgba(61,57,41,0.04) 1px, transparent 1px), linear-gradient(90deg, rgba(61,57,41,0.04) 1px, transparent 1px)",
-          backgroundSize: "60px 60px",
-        }}
-      />
+      {/* Interactive Dynamic Constellation Mesh Background */}
+      <div className="absolute inset-0 z-0 overflow-hidden pointer-events-none">
+        <ConstellationGrid hideOverlay className="w-full h-full opacity-85" />
+      </div>
 
       {/* Animated aurora blobs */}
       <div
